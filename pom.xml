@@ -189,6 +189,17 @@
 
   <repositories>
     <repository>
+      <id>ext-releases-local</id>
+      <name>Splunk Release Repository</name>
+      <url>http://splunk.artifactoryonline.com/splunk/ext-releases-local</url>
+      <releases>
+        <enabled>true</enabled>
+      </releases>
+      <snapshots>
+        <enabled>true</enabled>
+      </snapshots>
+    </repository>
+    <repository>
       <id>central</id>
       <!-- This should be at top, it makes maven try the central repo first and then others and hence faster dep resolution -->
       <name>Maven Repository</name>
