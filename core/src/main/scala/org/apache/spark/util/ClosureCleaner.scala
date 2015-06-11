@@ -109,7 +109,14 @@ private[spark] object ClosureCleaner extends Logging {
 
   private def createNullValue(cls: Class[_]): AnyRef = {
     if (cls.isPrimitive) {
-      new java.lang.Byte(0: Byte) // Should be convertible to any primitive type
+      cls match {
+        case java.lang.Boolean.TYPE => new java.lang.Boolean(false)
+        case java.lang.Character.TYPE => new java.lang.Character('\0')
+        case java.lang.Void.TYPE =>
+          // This should not happen because `Foo(void x) {}` does not compile.
+          throw new IllegalStateException("Unexpected void parameter in constructor")
+        case _ => new java.lang.Byte(0: Byte)
+      }
     } else {
       null
     }
@@ -179,6 +186,11 @@ private[spark] object ClosureCleaner extends Logging {
       cleanTransitively: Boolean,
       accessedFields: Map[Class[_], Set[String]]): Unit = {
 
+    if (!isClosure(func.getClass)) {
+      logWarning("Expected a closure; got " + func.getClass.getName)
+      return
+    }
+
     // TODO: clean all inner closures first. This requires us to find the inner objects.
     // TODO: cache outerClasses / innerClasses / accessedFields
 
@@ -234,15 +246,6 @@ private[spark] object ClosureCleaner extends Logging {
     logDebug(s" + fields accessed by starting closure: " + accessedFields.size)
     accessedFields.foreach { f => logDebug("     " + f) }
 
-    val inInterpreter = {
-      try {
-        val interpClass = Class.forName("spark.repl.Main")
-        interpClass.getMethod("interp").invoke(null) != null
-      } catch {
-        case _: ClassNotFoundException => true
-      }
-    }
-
     // List of outer (class, object) pairs, ordered from outermost to innermost
     // Note that all outer objects but the outermost one (first one in this list) must be closures
     var outerPairs: List[(Class[_], AnyRef)] = (outerClasses zip outerObjects).reverse
@@ -269,7 +272,7 @@ private[spark] object ClosureCleaner extends Logging {
       // required fields from the original object. We need the parent here because the Java
       // language specification requires the first constructor parameter of any closure to be
       // its enclosing object.
-      val clone = instantiateClass(cls, parent, inInterpreter)
+      val clone = instantiateClass(cls, parent)
       for (fieldName <- accessedFields(cls)) {
         val field = cls.getDeclaredField(fieldName)
         field.setAccessible(true)
@@ -312,7 +315,9 @@ private[spark] object ClosureCleaner extends Logging {
 
   private def ensureSerializable(func: AnyRef) {
     try {
-      SparkEnv.get.closureSerializer.newInstance().serialize(func)
+      if (SparkEnv.get != null) {
+        SparkEnv.get.closureSerializer.newInstance().serialize(func)
+      }
     } catch {
       case ex: Exception => throw new SparkException("Task not serializable", ex)
     }
@@ -320,32 +325,23 @@ private[spark] object ClosureCleaner extends Logging {
 
   private def instantiateClass(
       cls: Class[_],
-      enclosingObject: AnyRef,
-      inInterpreter: Boolean): AnyRef = {
-    if (!inInterpreter) {
-      // This is a bona fide closure class, whose constructor has no effects
-      // other than to set its fields, so use its constructor
-      val cons = cls.getConstructors()(0)
-      val params = cons.getParameterTypes.map(createNullValue).toArray
-      if (enclosingObject != null) {
-        params(0) = enclosingObject // First param is always enclosing object
-      }
-      return cons.newInstance(params: _*).asInstanceOf[AnyRef]
-    } else {
-      // Use reflection to instantiate object without calling constructor
-      val rf = sun.reflect.ReflectionFactory.getReflectionFactory()
-      val parentCtor = classOf[java.lang.Object].getDeclaredConstructor()
-      val newCtor = rf.newConstructorForSerialization(cls, parentCtor)
-      val obj = newCtor.newInstance().asInstanceOf[AnyRef]
-      if (enclosingObject != null) {
-        val field = cls.getDeclaredField("$outer")
-        field.setAccessible(true)
-        field.set(obj, enclosingObject)
-      }
-      obj
+      enclosingObject: AnyRef): AnyRef = {
+    // Use reflection to instantiate object without calling constructor
+    val rf = sun.reflect.ReflectionFactory.getReflectionFactory()
+    val parentCtor = classOf[java.lang.Object].getDeclaredConstructor()
+    val newCtor = rf.newConstructorForSerialization(cls, parentCtor)
+    val obj = newCtor.newInstance().asInstanceOf[AnyRef]
+    if (enclosingObject != null) {
+      val field = cls.getDeclaredField("$outer")
+      field.setAccessible(true)
+      field.set(obj, enclosingObject)
     }
+    obj
   }
 }
+
+private[spark] class ReturnStatementInClosureException
+  extends SparkException("Return statements aren't allowed in Spark closures")
 
 private class ReturnStatementFinder extends ClassVisitor(ASM4) {
   override def visitMethod(access: Int, name: String, desc: String,
@@ -354,7 +350,7 @@ private class ReturnStatementFinder extends ClassVisitor(ASM4) {
       new MethodVisitor(ASM4) {
         override def visitTypeInsn(op: Int, tp: String) {
           if (op == NEW && tp.contains("scala/runtime/NonLocalReturnControl")) {
-            throw new SparkException("Return statements aren't allowed in Spark closures")
+            throw new ReturnStatementInClosureException
           }
         }
       }

@@ -125,7 +125,7 @@ package object debug {
       }
     }
 
-    def execute(): RDD[Row] = {
+    protected override def doExecute(): RDD[Row] = {
       child.execute().mapPartitions { iter =>
         new Iterator[Row] {
           def hasNext: Boolean = iter.hasNext
@@ -170,6 +170,8 @@ package object debug {
       case (_: Short, ShortType) =>
       case (_: Boolean, BooleanType) =>
       case (_: Double, DoubleType) =>
+      case (_: Int, DateType) =>
+      case (_: Long, TimestampType) =>
       case (v, udt: UserDefinedType[_]) => typeCheck(v, udt.sqlType)
 
       case (d, t) => sys.error(s"Invalid data found: got $d (${d.getClass}) expected $t")
@@ -193,7 +195,7 @@ package object debug {
 
     def children: List[SparkPlan] = child :: Nil
 
-    def execute(): RDD[Row] = {
+    protected override def doExecute(): RDD[Row] = {
       child.execute().map { row =>
         try typeCheck(row, child.schema) catch {
           case e: Exception =>
