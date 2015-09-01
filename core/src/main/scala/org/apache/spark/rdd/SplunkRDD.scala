@@ -18,11 +18,12 @@
 package org.apache.spark.rdd
 
 import scala.collection.JavaConversions._
-import scala.reflect.ClassTag
+import scala.concurrent.Await
+import scala.language.implicitConversions
 
-import org.apache.spark.api.java.JavaSparkContext.fakeClassTag
-import org.apache.spark.api.java.{JavaRDD, JavaSparkContext}
-import org.apache.spark.api.java.function.{Function => JFunction}
+import org.apache.spark.scheduler.SparkListener
+import org.apache.spark.scheduler.SparkListenerApplicationEnd
+import org.apache.spark.scheduler.SparkListenerJobEnd
 import org.apache.spark.util.NextIterator
 import org.apache.spark.{Logging, Partition, SparkContext, TaskContext}
 
@@ -33,9 +34,16 @@ import akka.actor.Actor
 import akka.actor.ActorSystem
 import akka.actor.Props
 import akka.actor.ActorLogging
+import akka.pattern.ask
 import akka.serialization.SerializationExtension
 import akka.util.ByteString
-import java.lang.management.ManagementFactory
+import akka.util.Timeout
+import java.util.HashMap
+
+import org.zeromq.ZMQ
+
+import org.msgpack.ScalaMessagePack;
+import org.msgpack.annotation.Message;
 
 import com.splunk.{Event, Job, JobArgs, JobResultsArgs, ResultsReaderJson, Service, ServiceArgs}
 
@@ -49,11 +57,7 @@ private[spark] class SplunkPartition(idx: Int, val offset: Int, val count: Int) 
  *
  * @param service a Splunk Service object.
  * @param search the text of the query.
- *   The query must contain two ? placeholders for parameters used to partition the results.
- *   E.g. "select title, author from books where ? <= id and id <= ?"
  * @param numPartitions the number of partitions.
- *   Given a lowerBound of 1, an upperBound of 20, and a numPartitions of 2,
- *   the query would be executed twice, once with (1, 10) and once with (11, 20)
  */
 class SplunkRDD(
   sc: SparkContext,
@@ -62,7 +66,7 @@ class SplunkRDD(
   numPartitions: Int)
 extends RDD[Event](sc, Nil) with Logging {
 
-  val events = scala.collection.mutable.ListBuffer[Event]()
+  val events = scala.collection.mutable.ArrayBuffer[Event]()
 
   // Create a Service instance and log in with the argument map
   @transient val service = Service.connect(serviceArgs)
@@ -152,59 +156,121 @@ object SplunkRDD {
   }
 } 
 
-class SplunkPipeRDD(
-  sc: SparkContext,
-  bind: String,
-  numPartitions: Int)
-extends RDD[Event](sc, Nil) with Logging {
+class SplunkCustomFunctions[K, V](rdd: RDD[(K, V)]) {
+  def beamUp(connect: String): Unit = {
 
-  implicit val system = ActorSystem("demo")
+    rdd.foreachPartition(iter => {
+      val zmq = ZMQ.context(1)
+      val sender = zmq.socket(ZMQ.PUSH)
+      sender.connect(connect)
+
+      iter.foreach(x => {
+        val payload = ScalaMessagePack.write(x)
+        sender.send(payload, payload.size)
+      })
+
+      sender.close()
+    })
+  }
+}
+
+object SplunkCustomFunctions {
+  implicit def addSplunkCustomFunctions[K, V](rdd: RDD[(K, V)]) = new SplunkCustomFunctions[K, V](rdd) 
+}
+
+class SplunkPipeRDD(
+  @transient sc: SparkContext,
+  bind: String,
+  connect: String,
+  numPartitions: Int,
+  implicit val timeout: Timeout = Timeout(30 seconds)
+  )
+extends RDD[Map[String, String]](sc, Nil) {
+
+  type PipeEvent = Map[String, String]
+
+  case object Collect
+  case class Beam(data: List[PipeEvent])
+  var complete = false
+  val events = scala.collection.mutable.ArrayBuffer[PipeEvent]()
   
-  case object Tick
-  case class Heap(timestamp: Long, used: Long, max: Long)
-  case class Load(timestamp: Long, loadAverage: Double)
-  
+  class Channel extends Actor with ActorLogging {
+    val controller = ZeroMQExtension(context.system).newSocket(SocketType.Sub, Listener(self), Connect(connect), Subscribe(""))
+
+    def receive: Receive = {
+      case Connecting => println("Channel Connecting %s".format(this.self.path))
+      case m: ZMQMessage if m.frames(0).utf8String == "Stop" =>
+        println("shutting down")
+        context.system.shutdown()
+    }
+  }
+
   class SplunkPipe extends Actor with ActorLogging {
   
-    val repSocket = ZeroMQExtension(context.system).newSocket(SocketType.Rep, Listener(self), Bind("tcp://*:5555"))
+    //val repSocket = ZeroMQExtension(context.system).newSocket(SocketType.Rep, Listener(self), Bind("tcp://*:5555"))
     //val pubSocket = ZeroMQExtension(context.system).newSocket(SocketType.Pub,
     //  Bind("tcp://127.0.0.1:1235"))
-    val memory = ManagementFactory.getMemoryMXBean
-    val os = ManagementFactory.getOperatingSystemMXBean
     val ser = SerializationExtension(context.system)
-    import context.dispatcher
+
+    val zmq = ZeroMQExtension(context.system)
+    val receiver = zmq.newSocket(SocketType.Req, Listener(self), Connect("tcp://minion1:5557"), ReconnectIVL(60))
+    val events = scala.collection.mutable.ArrayBuffer[PipeEvent]()
+
+    //val items = context.poller
+    //items.register(receiver, ZMQ.Poller.POLLIN)
+    //items.register(controller, ZMQ.Poller.POLLIN)
+
+    import context._
   
     override def preStart() {
-      context.system.scheduler.schedule(1 second, 1 second, self, Tick)
+      //context.system.scheduler.schedule(1 second, 1 second, self, "ready2")(context.dispatcher, receiver)
     }
   
     override def postRestart(reason: Throwable) {
       // don't call preStart, only schedule once
     }
-  
+
     def receive: Receive = {
-      case Connecting => println("Connecting")
-      case m: ZMQMessage => println("got message " + m.frame(0)); repSocket ! m
-      case Tick =>
-        val currentHeap = memory.getHeapMemoryUsage
-        val timestamp = System.currentTimeMillis
+      case Connecting => println("Connecting %s".format(this.self.path))
+        receiver ! ZMQMessage(ByteString("ready"))
+      case m: ZMQMessage if m.frames(0).utf8String == "event" =>
+        println("event %s".format(this.self.path))
+        val deserialized: Map[String, String] = ScalaMessagePack.read[Map[String, String]](m.frames(1).toArray)
+        events += deserialized
   
         // use akka SerializationExtension to convert to bytes
-        val heapPayload = ser.serialize(Heap(timestamp, currentHeap.getUsed,
-          currentHeap.getMax)).get
+        //val heapPayload = ser.serialize(Heap(timestamp, currentHeap.getUsed,
+        //  currentHeap.getMax)).get
         // the first frame is the topic, second is the message
-        repSocket ! ZMQMessage(ByteString("health.heap"), ByteString(heapPayload))
-  
-        // use akka SerializationExtension to convert to bytes
-        val loadPayload = ser.serialize(Load(timestamp, os.getSystemLoadAverage)).get
-        // the first frame is the topic, second is the message
-        repSocket ! ZMQMessage(ByteString("health.load"), ByteString(loadPayload))
+        //pusher ! ZMQMessage(ByteString("health.heap"), ByteString(heapPayload))
+        receiver ! ZMQMessage(ByteString("ready"))
+
+      case m: ZMQMessage if m.frames(0).utf8String == "Complete" =>
+        complete = true
+        println("complete, ")
+      case m: ZMQMessage =>
+        println("%s".format(m.frames(0).utf8String))
+      case "pull" =>
+        receiver ! ZMQMessage(ByteString("ready"))
+      case Collect =>
+        println("Collect")
+        if (complete) {
+          println("send %s %d".format(this.self.path, events.size))
+          sender ! events
+        } else {
+          sender ! "noop " + this.self.path
+        }
+    }
+
+    def ready: Unit = {
+      receiver ! ZMQMessage(ByteString("ready"))
     }
   }
   
-  val server = system.actorOf(Props[SplunkPipe], "splunkpipe")
-
-  val events = scala.collection.mutable.ListBuffer[Event]()
+  /*sys addShutdownHook {
+    system.shutdown()
+    println("actorsystem shutdown")
+  }*/
 
   override def getPartitions: Array[Partition] = {
     val length = events.size
@@ -215,8 +281,49 @@ extends RDD[Event](sc, Nil) with Logging {
     }).toArray
   }
 
-  override def compute(split: Partition, context: TaskContext): Iterator[Event] = {
+  override def compute(split: Partition, context: TaskContext): Iterator[Map[String, String]] = {
+    println("computing %d".format(split.index))
+    val system = ActorSystem("demo")
+    val piper = system.actorOf(Props(classOf[SplunkPipe], this), "splunkpipe" + split.index.toString)
+    var i = 0
+    var done = false
+
+    println("actor path [%s]".format(piper.path))
+  
+    do {
+      val future = ask(piper, Collect)
+      val results = Await.result(future, timeout.duration)
+      
+      results match {
+        case results: scala.collection.mutable.ArrayBuffer[PipeEvent] => 
+          println("RESULTS-%d %d %s".format(split.index, results.size, results.getClass.getName))
+          events ++= results
+          done = true
+        case _ => 
+          println("%d %s".format(split.index, results))
+      }
+      i += 1
+      println("compute-%d %d".format(split.index, i))
+      if (!done) {
+        Thread.sleep(500)
+      }
+    } while (!done)
+    
     events.iterator()
+  }
+
+  //override def collect[U](f: PartialFunction[T, U])(implicit arg0: ClassTag[U]): RDD[U] = {
+  //}
+
+}
+
+class MySparkListener extends SparkListener {
+  override def onApplicationEnd(applicationEnd: SparkListenerApplicationEnd): Unit = {
+    println("applicationEnd")
+  }
+
+  override def onJobEnd(jobEnd: SparkListenerJobEnd): Unit = {
+    println("jobEnd")
   }
 }
 
