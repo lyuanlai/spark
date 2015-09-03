@@ -1493,6 +1493,16 @@ class SQLQuerySuite extends QueryTest with SharedSQLContext {
     checkAnswer(
       sql(
         """
+          |SELECT sum(b)
+          |FROM orderByData
+          |GROUP BY a
+          |ORDER BY sum(b), max(b)
+        """.stripMargin),
+      Row(3) :: Row(7) :: Row(11) :: Row(15) :: Nil)
+
+    checkAnswer(
+      sql(
+        """
           |SELECT a, sum(b)
           |FROM orderByData
           |GROUP BY a
@@ -1622,9 +1632,40 @@ class SQLQuerySuite extends QueryTest with SharedSQLContext {
     checkAnswer(sql("select 10.3000 / 3.0"), Row(BigDecimal("3.4333333")))
     checkAnswer(sql("select 10.30000 / 30.0"), Row(BigDecimal("0.343333333")))
     checkAnswer(sql("select 10.300000000000000000 / 3.00000000000000000"),
-      Row(BigDecimal("3.4333333333333333333333333333333333333", new MathContext(38))))
+      Row(BigDecimal("3.433333333333333333333333333", new MathContext(38))))
     checkAnswer(sql("select 10.3000000000000000000 / 3.00000000000000000"),
-      Row(null))
+      Row(BigDecimal("3.4333333333333333333333333333", new MathContext(38))))
+  }
+
+  test("SPARK-10215 Div of Decimal returns null") {
+    val d = Decimal(1.12321)
+    val df = Seq((d, 1)).toDF("a", "b")
+
+    checkAnswer(
+      df.selectExpr("b * a / b"),
+      Seq(Row(d.toBigDecimal)))
+    checkAnswer(
+      df.selectExpr("b * a / b / b"),
+      Seq(Row(d.toBigDecimal)))
+    checkAnswer(
+      df.selectExpr("b * a + b"),
+      Seq(Row(BigDecimal(2.12321))))
+    checkAnswer(
+      df.selectExpr("b * a - b"),
+      Seq(Row(BigDecimal(0.12321))))
+    checkAnswer(
+      df.selectExpr("b * a * b"),
+      Seq(Row(d.toBigDecimal)))
+  }
+
+  test("precision smaller than scale") {
+    checkAnswer(sql("select 10.00"), Row(BigDecimal("10.00")))
+    checkAnswer(sql("select 1.00"), Row(BigDecimal("1.00")))
+    checkAnswer(sql("select 0.10"), Row(BigDecimal("0.10")))
+    checkAnswer(sql("select 0.01"), Row(BigDecimal("0.01")))
+    checkAnswer(sql("select 0.001"), Row(BigDecimal("0.001")))
+    checkAnswer(sql("select -0.01"), Row(BigDecimal("-0.01")))
+    checkAnswer(sql("select -0.001"), Row(BigDecimal("-0.001")))
   }
 
   test("external sorting updates peak execution memory") {
@@ -1681,9 +1722,20 @@ class SQLQuerySuite extends QueryTest with SharedSQLContext {
   }
 
   test("SPARK-10130 type coercion for IF should have children resolved first") {
-    val df = Seq((1, 1), (-1, 1)).toDF("key", "value")
-    df.registerTempTable("src")
-    checkAnswer(
-      sql("SELECT IF(a > 0, a, 0) FROM (SELECT key a FROM src) temp"), Seq(Row(1), Row(0)))
+    withTempTable("src") {
+      Seq((1, 1), (-1, 1)).toDF("key", "value").registerTempTable("src")
+      checkAnswer(
+        sql("SELECT IF(a > 0, a, 0) FROM (SELECT key a FROM src) temp"), Seq(Row(1), Row(0)))
+    }
+  }
+
+  test("SPARK-10389: order by non-attribute grouping expression on Aggregate") {
+    withTempTable("src") {
+      Seq((1, 1), (-1, 1)).toDF("key", "value").registerTempTable("src")
+      checkAnswer(sql("SELECT MAX(value) FROM src GROUP BY key + 1 ORDER BY key + 1"),
+        Seq(Row(1), Row(1)))
+      checkAnswer(sql("SELECT MAX(value) FROM src GROUP BY key + 1 ORDER BY (key + 1) * 2"),
+        Seq(Row(1), Row(1)))
+    }
   }
 }
