@@ -678,6 +678,20 @@ class SparkContext(object):
                                              jconf, batchSize)
         return RDD(jrdd, self)
 
+    def splunkRDD(self, host, port, user, passwd, search, numPartitions=4):
+        """
+        Splunk RDD
+
+        :param host: splunkd host
+        :param port: splunkd port
+        :param user: username
+        :param passwd: password
+        :param search: splunk search string
+        """
+        jrdd = self._jvm.SplunkRDD.create(self._jsc, user, passwd,
+                host, port, search, numPartitions)
+        return RDD(jrdd, self)
+
     def _checkpointFile(self, name, input_deserializer):
         jrdd = self._jsc.checkpointFile(name)
         return RDD(jrdd, self, input_deserializer)

@@ -34,10 +34,13 @@ object SplunkUtils {
     val service = Service.connect(serviceArgs)
     service.login()
 
+    //println("batchduration %s".format(ssc.graph.batchDuration))
+    val batchDuration = ssc.graph.batchDuration
+    val timerange = batchDuration.milliseconds / 1000
     val jobArgs = new JobArgs()
     jobArgs.setExecutionMode(JobArgs.ExecutionMode.NORMAL)
     jobArgs.setSearchMode(JobArgs.SearchMode.REALTIME)
-    jobArgs.setEarliestTime("rt-1m")
+    jobArgs.setEarliestTime("rt-%ds".format(timerange))
     jobArgs.setLatestTime("rt")
     jobArgs.setStatusBuckets(300)
 

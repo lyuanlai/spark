@@ -47,6 +47,11 @@
       <type>test-jar</type>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>com.splunk</groupId>
+      <artifactId>splunk</artifactId>
+      <version>1.4.0.0</version>
+    </dependency>
 
     <!-- Explicit listing of transitive deps that are shaded. Otherwise, odd compiler crashes. -->
     <dependency>

@@ -360,9 +360,24 @@
       <version>0.8.2.1</version>
     </dependency>
     <dependency>
+      <groupId>org.zeromq</groupId>
+      <artifactId>jeromq</artifactId>
+      <version>0.3.5</version>
+    </dependency>
+    <dependency>
       <groupId>com.splunk</groupId>
       <artifactId>splunk</artifactId>
       <version>1.4.0.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.msgpack</groupId>
+      <artifactId>msgpack</artifactId>
+      <version>0.6.12</version>
+    </dependency>
+    <dependency>
+      <groupId>org.msgpack</groupId>
+      <artifactId>msgpack-scala_2.10</artifactId>
+      <version>0.6.11</version>
     </dependency>
   </dependencies>
   <build>
