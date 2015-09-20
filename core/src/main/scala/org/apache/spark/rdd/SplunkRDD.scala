@@ -37,6 +37,11 @@ import org.zeromq.ZMQException
 import org.msgpack.ScalaMessagePack
 import org.msgpack.annotation.Message
 
+import org.velvia.msgpack._
+import org.velvia.msgpack.SimpleCodecs._
+import org.velvia.msgpack.CollectionCodecs._
+import org.velvia.MsgPack
+
 import com.splunk.{Event, Job, JobArgs, JobResultsArgs, ResultsReaderJson, Service, ServiceArgs}
 
 private[spark] class SplunkPartition(idx: Int, val offset: Int, val count: Int) extends Partition {
@@ -164,7 +169,7 @@ class SplunkCustomFunctions[T <: Map[String, Any]](rdd: RDD[T]) {
       sender.connect(connect)
 
       iter.foreach(x => {
-        val payload = ScalaMessagePack.write(ScalaMessagePack.objToValue(x))
+        val payload = ScalaMessagePack.write(x)
         sender.send(payload, 0)
       })
 
@@ -184,14 +189,9 @@ class SplunkPipeRDD(
   connect: String,
   numPartitions: Int
   )
-extends RDD[Map[String, Any]](sc, Nil) {
+extends RDD[Map[String, String]](sc, Nil) {
 
-  type PipeEvent = Map[String, Any]
-
-  /*sys addShutdownHook {
-    system.shutdown()
-    println("actorsystem shutdown")
-  }*/
+  type PipeEvent = Map[String, String]
 
   override def getPartitions: Array[Partition] = {
     val zmq = ZMQ.context(1)
@@ -233,7 +233,7 @@ extends RDD[Map[String, Any]](sc, Nil) {
           m match {
             case m: Array[Byte] => 
               val unpacked = ScalaMessagePack.read[PipeEvent](m)
-              println("message %d %s".format(i, unpacked))
+              println("message %d".format(i))
               //println("%s".format(unpacked._2))
               events += unpacked
               i += 1

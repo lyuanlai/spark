@@ -387,6 +387,11 @@
       <artifactId>msgpack-scala_2.10</artifactId>
       <version>0.6.11</version>
     </dependency>
+    <dependency>
+      <groupId>org.velvia</groupId>
+      <artifactId>msgpack4s_2.10</artifactId>
+      <version>0.5.1</version>
+    </dependency>
   </dependencies>
   <build>
     <outputDirectory>target/scala-${scala.binary.version}/classes</outputDirectory>

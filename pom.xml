@@ -318,6 +318,14 @@
         <enabled>false</enabled>
       </snapshots>
     </repository>
+    <repository>
+      <id>velvia maven</id>
+      <name>velvia maven</name>
+      <url>http://dl.bintray.com/velvia/maven</url>
+      <releases>
+        <enabled>true</enabled>
+      </releases>
+    </repository>
   </repositories>
   <pluginRepositories>
     <pluginRepository>
