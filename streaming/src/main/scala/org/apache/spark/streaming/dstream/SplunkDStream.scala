@@ -16,7 +16,7 @@ import com.splunk.{Event, JobArgs, JobResultsPreviewArgs, ResultsReaderJson, Ser
 
 object SplunkUtils {
   def createStream(
-    ssc: StreamingContext,
+    @transient ssc: StreamingContext,
     host: String,
     port: Int,
     username: String,
@@ -107,24 +107,25 @@ class SplunkReceiver(
       val previewArgs = new JobResultsPreviewArgs()
       previewArgs.setCount(300);     // Retrieve 300 previews at a time
       previewArgs.setOutputMode(JobResultsPreviewArgs.OutputMode.JSON)
-      println("previewing %s".format(job.isReady()))
+      println("previewing %s %b".format(job.isReady(), isStopped))
 
-      val stream : InputStream = job.getResultsPreview(previewArgs)
-
-      val resultsReaderNormalSearch = new ResultsReaderJson(stream)
-      val reader = iterableAsScalaIterable(resultsReaderNormalSearch)
       // Until stopped or connection broken continue reading
       //val reader = new BufferedReader(new InputStreamReader(stream, "UTF-8"))
-      if(!isStopped) {
+      while(!isStopped) {
+        val stream : InputStream = job.getResultsPreview(previewArgs)
+
+        val resultsReaderNormalSearch = new ResultsReaderJson(stream)
+        val reader = iterableAsScalaIterable(resultsReaderNormalSearch)
         reader.foreach(event => {
           store(event)
         })
+
+        stream.close()
+        Thread.sleep(500)
       }
-      //reader.close()
-      stream.close()
 
       // Restart in an attempt to connect again when server is active again
-      restart("Trying to connect again")
+      //restart("Trying to connect again")
     } catch {
       case e: java.net.ConnectException =>
         // restart if could not connect to server
