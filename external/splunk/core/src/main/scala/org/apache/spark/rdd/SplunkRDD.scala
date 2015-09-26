@@ -161,7 +161,7 @@ class SplunkCustomFunctions[T <: Map[String, Any]](rdd: RDD[T]) {
     @transient val sc = rdd.context
     val numpart = rdd.partitions.size
     controller.connect(connect)
-    controller.send(ScalaMessagePack.write(("partitions", numpart)))
+    controller.send(ScalaMessagePack.write(("partitions", numpart)), 0)
 
     rdd.foreachPartition(iter => {
       val zmq = ZMQ.context(1)
@@ -173,7 +173,7 @@ class SplunkCustomFunctions[T <: Map[String, Any]](rdd: RDD[T]) {
         sender.send(payload, 0)
       })
 
-      sender.send(ScalaMessagePack.write("complete"))
+      sender.send(ScalaMessagePack.write("complete"), 0)
       sender.close()
     })
   }

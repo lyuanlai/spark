@@ -21,19 +21,37 @@
   <parent>
     <groupId>org.apache.spark</groupId>
     <artifactId>spark-parent_2.10</artifactId>
-    <version>1.4.0-SNAPSHOT</version>
+    <version>1.6.0-SNAPSHOT</version>
     <relativePath>../../pom.xml</relativePath>
   </parent>
 
   <groupId>org.apache.spark</groupId>
-  <artifactId>spark-splunk_2.10</artifactId>
+  <artifactId>spark-streaming-splunk_2.10</artifactId>
   <properties>
-    <sbt.project.name>spark-splunk</sbt.project.name>
+    <sbt.project.name>streaming-splunk</sbt.project.name>
   </properties>
   <packaging>jar</packaging>
-  <name>Spark Project External Flume</name>
+  <name>Spark Project External Splunk</name>
   <url>http://spark.apache.org/</url>
 
+  <repositories>
+    <repository>
+      <id>ext-releases-local</id>
+      <name>Splunk Release Repository</name>
+      <url>http://splunk.artifactoryonline.com/splunk/ext-releases-local</url>
+      <releases>
+        <enabled>true</enabled>
+      </releases>
+      <snapshots>
+        <enabled>true</enabled>
+      </snapshots>
+    </repository>
+    <repository>
+      <id>velvia maven</id>
+      <name>velvia maven</name>
+      <url>"http://dl.bintray.com/velvia/maven</url>
+    </repository>
+  </repositories>
   <dependencies>
     <dependency>
       <groupId>org.apache.spark</groupId>
@@ -43,31 +61,35 @@
     </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
-      <artifactId>spark-streaming-flume-sink_${scala.binary.version}</artifactId>
+      <artifactId>spark-core_${scala.binary.version}</artifactId>
       <version>${project.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.flume</groupId>
-      <artifactId>flume-ng-core</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.flume</groupId>
-      <artifactId>flume-ng-sdk</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.scalacheck</groupId>
-      <artifactId>scalacheck_${scala.binary.version}</artifactId>
+      <type>test-jar</type>
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>junit</groupId>
-      <artifactId>junit</artifactId>
-      <scope>test</scope>
+      <groupId>org.zeromq</groupId>
+      <artifactId>jeromq</artifactId>
+      <version>0.3.5</version>
     </dependency>
     <dependency>
-      <groupId>com.novocode</groupId>
-      <artifactId>junit-interface</artifactId>
-      <scope>test</scope>
+      <groupId>com.splunk</groupId>
+      <artifactId>splunk</artifactId>
+      <version>1.4.0.0</version>
+    </dependency>
+    <dependency>
+      <groupId>org.msgpack</groupId>
+      <artifactId>msgpack</artifactId>
+      <version>0.6.12</version>
+    </dependency>
+    <dependency>
+      <groupId>org.msgpack</groupId>
+      <artifactId>msgpack-scala_2.10</artifactId>
+      <version>0.6.11</version>
+    </dependency>
+    <dependency>
+      <groupId>org.velvia</groupId>
+      <artifactId>msgpack4s_2.10</artifactId>
+      <version>0.5.1</version>
     </dependency>
   </dependencies>
   <build>
