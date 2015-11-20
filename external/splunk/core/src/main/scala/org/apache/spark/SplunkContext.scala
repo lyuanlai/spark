@@ -7,17 +7,10 @@ import org.apache.spark.rdd.{RDD, RDDOperationScope}
 
 import org.apache.spark.util.{CallSite, ShutdownHookManager, Utils}
 
-final class SplunkContext(sc_ : SparkContext, timeout_ : Duration) extends Logging {
+import com.splunk.{Service, ServiceArgs}
 
-  /**
-   * Create a SplunkContext by providing the configuration necessary for a new SparkContext.
-   * @param conf a org.apache.spark.SparkConf object specifying Spark parameters
-   * @param timeout the time interval at which spark data will be divided into batches
-   */
-  def this(conf: SparkConf, timeout: Duration) = {
-    this(SplunkContext.createNewSparkContext(conf), timeout)
-  }
-
+final class SplunkContext(val serviceArgs : ServiceArgs, sc_ : SparkContext) extends Logging {
+  
   private[spark] val sc: SparkContext = {
     if (sc_ != null) {
       sc_
@@ -25,8 +18,6 @@ final class SplunkContext(sc_ : SparkContext, timeout_ : Duration) extends Loggi
       throw new SparkException("Cannot create SplunkContext without a SparkContext")
     }
   }
-
-  private val timeout: Duration = timeout_
 
   if (sc.conf.get("spark.master") == "local" || sc.conf.get("spark.master") == "local[1]") {
     logWarning("spark.master should be set as local[n], n > 1 in local mode if you have receivers" +
@@ -62,7 +53,29 @@ final class SplunkContext(sc_ : SparkContext, timeout_ : Duration) extends Loggi
 }
 
 object SplunkContext extends Logging {
-  private[spark] def createNewSparkContext(conf: SparkConf): SparkContext = {
-    new SparkContext(conf)
+  //private[spark] def createNewSplunkContext(conf: SparkConf): SparkContext = {
+  def createNewSplunkContext(
+      username: String,
+      password: String,
+      host: String,
+      port: Int,
+      sc: SparkContext): SplunkContext = {
+
+    val loginArgs = new ServiceArgs()
+    loginArgs.setUsername(username)
+    loginArgs.setPassword(password)
+    loginArgs.setHost(host)
+    loginArgs.setPort(port)
+
+    new SplunkContext(loginArgs, sc)
+  }
+
+  def createNewSplunkContext(
+      username: String,
+      password: String,
+      host: String,
+      port: Int,
+      conf: SparkConf): SplunkContext = {
+    createNewSplunkContext(username, password, host, port, new SparkContext(conf))
   }
 }

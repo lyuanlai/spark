@@ -17,6 +17,14 @@
 
 package org.apache.spark.rdd
 
+import java.nio.file.Files
+import java.nio.file.Paths
+import java.security.KeyFactory
+import java.security.PrivateKey
+import java.security.SecureRandom
+import java.security.Signature
+import java.security.spec.PKCS8EncodedKeySpec
+
 import scala.collection.JavaConversions._
 import scala.concurrent.Await
 import scala.language.implicitConversions
@@ -25,7 +33,7 @@ import org.apache.spark.scheduler.SparkListener
 import org.apache.spark.scheduler.SparkListenerApplicationEnd
 import org.apache.spark.scheduler.SparkListenerJobEnd
 import org.apache.spark.util.NextIterator
-import org.apache.spark.{Logging, Partition, SparkContext, TaskContext}
+import org.apache.spark.{Logging, Partition, SparkContext, TaskContext, SplunkContext}
 
 import scala.concurrent.duration._
 import scala.language.postfixOps
@@ -37,15 +45,124 @@ import org.zeromq.ZMQException
 import org.msgpack.ScalaMessagePack
 import org.msgpack.annotation.Message
 
-import org.velvia.msgpack._
-import org.velvia.msgpack.SimpleCodecs._
-import org.velvia.msgpack.CollectionCodecs._
-import org.velvia.MsgPack
+import scalaj.http._
 
 import com.splunk.{Event, Job, JobArgs, JobResultsArgs, ResultsReaderJson, Service, ServiceArgs}
+import com.splunk.DistributedPeer
 
 private[spark] class SplunkPartition(idx: Int, val offset: Int, val count: Int) extends Partition {
   override def index: Int = idx
+}
+
+private[spark] class SplunkIPartition(idx: Int, val peers: Seq[String], subidx: Int) extends Partition {
+  override def index: Int = idx                    
+  def locations: Seq[String] = peers
+}
+
+class SplunkIRDD(
+  sc: SplunkContext,
+  search: String,
+  numPartitions: Int)
+extends RDD[String](sc.sc, Nil) with Logging {
+
+  val events = scala.collection.mutable.ArrayBuffer[Event]()
+  val serviceArgs = sc.serviceArgs
+
+  // Create a Service instance and log in with the argument map
+  @transient val service = Service.connect(serviceArgs)
+
+  // Run a normal search
+  val jobargs = new JobArgs()
+  jobargs.setExecutionMode(JobArgs.ExecutionMode.NORMAL)
+  @transient val _job = service.getJobs().create(search, jobargs)
+  val sid = _job.getSid()
+  //println("init sid: %s args: %s".format(sid, serviceArgs))
+
+  def waitForJobDone(job: Job): Unit = {
+    // Wait for the search to finish
+    while (!job.isDone()) {
+      try {
+        Thread.sleep(500)
+        job.refresh()
+      } catch {
+        // TODO Auto-generated catch block
+        case e: InterruptedException => {
+          e.printStackTrace()
+        }
+      }
+    }
+  }
+
+  override def getPartitions: Array[Partition] = {
+    val service = Service.connect(serviceArgs)
+    val peers = service.getDistributedPeers()
+    val plist = peers.keySet().map(k => peers.get(k).getPeerName()).toList
+    val peerperpart = math.max(peers.size() / numPartitions, 1)
+    println("getPartitions args: %s %d".format(serviceArgs, peerperpart))
+
+    (0 until numPartitions).map(i => {
+      new SplunkIPartition(i, plist.slice(i*peerperpart, (i+1)*peerperpart), 0)
+    }).toArray
+  }
+
+  val NONCE_LENGTH = 16
+
+  def getPrivateKey(filename: String): PrivateKey = {
+    val keyBytes = Files.readAllBytes(Paths.get(filename))
+    val spec = new PKCS8EncodedKeySpec(keyBytes)
+    val kf = KeyFactory.getInstance("RSA")
+
+    kf.generatePrivate(spec)
+  }
+
+  def searchreq(server: String, search_ : String): String = {
+    val prikey = getPrivateKey("/home/llai/splunk/etc/auth/distServerKeys/private.der") 
+    val secrand = SecureRandom.getInstance("SHA1PRNG")
+    secrand.setSeed(System.currentTimeMillis())
+    val temp = new Array[Byte](NONCE_LENGTH)
+    secrand.nextBytes(temp)
+    val nonce = "&" + temp.map("%02X" format _).mkString
+    val sig: Signature = Signature.getInstance("SHA1withRSA")
+    sig.initSign(prikey)
+    sig.update(nonce.getBytes())
+    val signature = java.util.Base64.getEncoder.encodeToString(sig.sign())
+    val sid = "%.2f".format(System.currentTimeMillis().toFloat/1000)
+    val headers = Map("x-splunk-dist-search-peername" -> "heelo",
+      "x-splunk-dist-search-nonce" -> nonce,
+      "x-splunk-dist-search-signature" -> signature)
+    val query = Map("sh_id" -> "simpleapp_%d".format(System.currentTimeMillis()/1000))
+    val data = Seq("pipeline" -> search_, "output" -> "csv", "is_dispatch" -> "1", "server_name" -> server, "real_server_name" -> server, "sid" -> sid, "user" -> "nobody", "sh_id" -> sid, "role" ->"admin", "application" -> "search")
+    val results = Http("https://127.0.0.1:8089/services/streams/search?sh_id=" + sid).option(HttpOptions.allowUnsafeSSL).auth("admin", "changemee").postForm(data).asString
+    //val results = Http(req OK as.String)
+    println(results)
+    results.body
+  }
+
+  override def compute(split: Partition, context: TaskContext): Iterator[String] = {
+    //context.addTaskCompletionListener{ context => closeIfNeeded() }
+    var part = split.asInstanceOf[SplunkIPartition]
+    val peers = part.peers
+    println("compute partition: %d".format(part.index))
+
+    try {
+      peers.flatMap(peer => {
+        println("peer %s".format(peer))
+        val results = searchreq(peer, search)
+        results.split("\n")
+      }).toIterator
+    } catch {
+      case e: Exception => e.printStackTrace()
+      List[String]().iterator
+    }
+  }
+
+  def rename(): SplunkIRDD = {
+    this
+  }
+
+  def eval(expr: String): SplunkIRDD = {
+    this
+  }
 }
 
 /**
