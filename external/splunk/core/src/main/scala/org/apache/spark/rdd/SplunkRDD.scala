@@ -17,6 +17,7 @@
 
 package org.apache.spark.rdd
 
+import java.io.StringReader
 import java.nio.file.Files
 import java.nio.file.Paths
 import java.security.KeyFactory
@@ -34,6 +35,9 @@ import org.apache.spark.scheduler.SparkListenerApplicationEnd
 import org.apache.spark.scheduler.SparkListenerJobEnd
 import org.apache.spark.util.NextIterator
 import org.apache.spark.{Logging, Partition, SparkContext, TaskContext, SplunkContext}
+
+import org.apache.commons.csv.CSVFormat
+import org.apache.commons.csv.CSVParser
 
 import scala.concurrent.duration._
 import scala.language.postfixOps
@@ -60,38 +64,16 @@ private[spark] class SplunkIPartition(idx: Int, val peers: Seq[String], subidx: 
 }
 
 class SplunkIRDD(
-  sc: SplunkContext,
+  @transient sc: SplunkContext,
   search: String,
   numPartitions: Int)
-extends RDD[String](sc.sc, Nil) with Logging {
+extends RDD[Map[String, String]](sc.sc, Nil) with Logging {
+
+  case class SplunkResults(version: String, header: CSVParser, body: CSVParser)
 
   val events = scala.collection.mutable.ArrayBuffer[Event]()
   val serviceArgs = sc.serviceArgs
-
-  // Create a Service instance and log in with the argument map
-  @transient val service = Service.connect(serviceArgs)
-
-  // Run a normal search
-  val jobargs = new JobArgs()
-  jobargs.setExecutionMode(JobArgs.ExecutionMode.NORMAL)
-  @transient val _job = service.getJobs().create(search, jobargs)
-  val sid = _job.getSid()
-  //println("init sid: %s args: %s".format(sid, serviceArgs))
-
-  def waitForJobDone(job: Job): Unit = {
-    // Wait for the search to finish
-    while (!job.isDone()) {
-      try {
-        Thread.sleep(500)
-        job.refresh()
-      } catch {
-        // TODO Auto-generated catch block
-        case e: InterruptedException => {
-          e.printStackTrace()
-        }
-      }
-    }
-  }
+  private def privatekey = getPrivateKey(sys.env("SPLUNK_HOME") + "/etc/auth/distServerKeys/private.der")
 
   override def getPartitions: Array[Partition] = {
     val service = Service.connect(serviceArgs)
@@ -99,6 +81,8 @@ extends RDD[String](sc.sc, Nil) with Logging {
     val plist = peers.keySet().map(k => peers.get(k).getPeerName()).toList
     val peerperpart = math.max(peers.size() / numPartitions, 1)
     println("getPartitions args: %s %d".format(serviceArgs, peerperpart))
+    println("peers %s".format(plist))
+    peers.keySet().foreach(k => println("%s %s".format(k, peers.get(k).values())))
 
     (0 until numPartitions).map(i => {
       new SplunkIPartition(i, plist.slice(i*peerperpart, (i+1)*peerperpart), 0)
@@ -115,30 +99,26 @@ extends RDD[String](sc.sc, Nil) with Logging {
     kf.generatePrivate(spec)
   }
 
-  def searchreq(server: String, search_ : String): String = {
-    val prikey = getPrivateKey("/home/llai/splunk/etc/auth/distServerKeys/private.der") 
+  def searchreq(host: String, server: String, search_ : String): HttpResponse[String] = {
     val secrand = SecureRandom.getInstance("SHA1PRNG")
     secrand.setSeed(System.currentTimeMillis())
     val temp = new Array[Byte](NONCE_LENGTH)
     secrand.nextBytes(temp)
     val nonce = "&" + temp.map("%02X" format _).mkString
     val sig: Signature = Signature.getInstance("SHA1withRSA")
-    sig.initSign(prikey)
+    sig.initSign(privatekey)
     sig.update(nonce.getBytes())
     val signature = java.util.Base64.getEncoder.encodeToString(sig.sign())
     val sid = "%.2f".format(System.currentTimeMillis().toFloat/1000)
-    val headers = Map("x-splunk-dist-search-peername" -> "heelo",
+    val headers = Map("x-splunk-dist-search-peername" -> host,
       "x-splunk-dist-search-nonce" -> nonce,
       "x-splunk-dist-search-signature" -> signature)
     val query = Map("sh_id" -> "simpleapp_%d".format(System.currentTimeMillis()/1000))
-    val data = Seq("pipeline" -> search_, "output" -> "csv", "is_dispatch" -> "1", "server_name" -> server, "real_server_name" -> server, "sid" -> sid, "user" -> "nobody", "sh_id" -> sid, "role" ->"admin", "application" -> "search")
-    val results = Http("https://127.0.0.1:8089/services/streams/search?sh_id=" + sid).option(HttpOptions.allowUnsafeSSL).auth("admin", "changemee").postForm(data).asString
-    //val results = Http(req OK as.String)
-    println(results)
-    results.body
+    val data = Seq("pipeline" -> search_, "output" -> "csv", "is_dispatch" -> "1", "server_name" -> host, "real_server_name" -> host, "sid" -> sid, "user" -> "nobody", "sh_id" -> sid, "role" ->"admin", "application" -> "search")
+    Http("https://%s:8089/services/streams/search?sh_id=%s".format(server, sid)).option(HttpOptions.allowUnsafeSSL).auth("admin", "changemee").postForm(data).asString
   }
 
-  override def compute(split: Partition, context: TaskContext): Iterator[String] = {
+  override def compute(split: Partition, context: TaskContext): Iterator[Map[String, String]] = {
     //context.addTaskCompletionListener{ context => closeIfNeeded() }
     var part = split.asInstanceOf[SplunkIPartition]
     val peers = part.peers
@@ -147,12 +127,46 @@ extends RDD[String](sc.sc, Nil) with Logging {
     try {
       peers.flatMap(peer => {
         println("peer %s".format(peer))
-        val results = searchreq(peer, search)
-        results.split("\n")
+        val host = serviceArgs.host
+        val response = searchreq(host, peer, search)
+        val s = response.body
+
+        val len = s.size
+        val lines = s.linesWithSeparators
+        val re = "\\s*splunk ([\\d\\.]+),(\\d+),(\\d+)\n".r
+        var pos = 0
+
+        val results = lines.collect(line => {
+          line match {
+            case re(version, headerlen, bodylen) => {
+              val start = pos + line.size
+              val mid = start + headerlen.toInt
+              val end = mid + bodylen.toInt
+              val header = s.slice(start, mid)
+              val body = s.slice(mid, end)
+              pos = end
+
+              val headercsv = CSVParser.parse(header, CSVFormat.EXCEL.withHeader())
+              val bodycsv = CSVParser.parse(body, CSVFormat.EXCEL.withHeader())
+              SplunkResults(version, headercsv, bodycsv)
+            }
+          }
+        })
+
+        results.foreach(result => {
+          result.header.iterator().collect { case x if x.get("_scan_count").nonEmpty => x.get("_scan_count").toInt }.foreach(println)
+          result.body.iterator().foreach(x => {
+            println(x.toMap().filter(x => x._2.nonEmpty).mkString(", "))
+          })
+        })
+
+        results.flatMap(result => {
+          result.body.iterator().map(x => x.toMap().toMap)
+        })
       }).toIterator
     } catch {
       case e: Exception => e.printStackTrace()
-      List[String]().iterator
+      List[Map[String, String]]().iterator
     }
   }
 
